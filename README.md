@@ -60,28 +60,9 @@ Cursor 使用 `x-is-human` 请求头进行人机验证。这个 token 由前端 
 4. 返回 x-is-human token
 ```
 
-### 3. Token 池管理
+### 3. Token 生成
 
-为了提高性能和避免频繁生成 token，实现了 Token 池机制：
-
-```
-┌─────────────────────────────────────────┐
-│              Token Pool                  │
-├─────────────────────────────────────────┤
-│  Token-1  │  Token-2  │  Token-3  │ ... │
-│  (预热)    │  (预热)    │  (预热)    │     │
-└─────────────────────────────────────────┘
-          ↓ 轮询获取 (Round Robin)
-     ┌─────────────────────┐
-     │    API 请求使用      │
-     └─────────────────────┘
-```
-
-**特性：**
-- **预热机制** - 启动时预生成 N 个 token（默认 3 个）
-- **轮询分发** - 请求按顺序使用不同 token，避免单个 token 过载
-- **自动刷新** - 后台每 20 分钟刷新所有 token（过期时间 25 分钟）
-- **懒加载刷新** - 使用时检测过期，异步触发刷新
+每次 API 请求都会生成新的 x-is-human token，避免被 Cursor 检测到 token 重复使用。
 
 ### 4. 协议转换
 
@@ -142,8 +123,8 @@ cursor2api/
 │   ├── client/          # Cursor API 客户端 (TLS 指纹模拟)
 │   ├── config/          # 配置管理
 │   ├── handler/         # HTTP 处理器 (Anthropic/OpenAI 协议)
-│   ├── token/           # Token 池管理 (x-is-human 生成)
-│   ├── toolify/         # 工具调用处理 (Prompt 注入 + 解析)
+│   ├── token/           # Token 生成 (x-is-human)
+│   ├── toolify/         # Tool Use 协议 (Prompt 注入 + 解析)
 │   └── logger/          # 日志模块
 ├── jscode/              # JS 脚本
 │   ├── env.js           # 浏览器环境模拟
@@ -245,9 +226,6 @@ fingerprint:
 
 # 支持的模型列表
 models: "gpt-4o,claude-3.5-sonnet,claude-3.7-sonnet"
-
-# Token 池配置
-token_pool_size: 3  # 预热 token 数量，默认 3
 ```
 
 支持的环境变量：
@@ -255,7 +233,6 @@ token_pool_size: 3  # 预热 token 数量，默认 3
 - `PROXY` - 代理地址
 - `SCRIPT_URL` - Cursor 验证脚本 URL
 - `FP` - 浏览器指纹（base64 编码的 JSON）
-- `TOKEN_POOL_SIZE` - Token 池大小（默认 3）
 - `MODELS` - 模型列表
 
 ## API 接口
@@ -302,134 +279,14 @@ export ANTHROPIC_BASE_URL=http://localhost:3010
 claude
 ```
 
-## 自动执行模式
-
-由于 Cursor 文档页的 AI 被设计为只读模式，无法直接执行文件写入、命令执行等操作。本项目实现了**自动执行模式**来解决这个问题。
-
-### 工作原理
-
-1. AI 收到工具调用请求后，会拒绝执行并建议用户手动运行命令
-2. 系统检测到拒绝响应后，自动提取 AI 建议的命令
-3. 在本地自动执行该命令
-4. 将执行结果返回给客户端
-
-### 配置开关
-
-```yaml
-# config.yaml
-browser:
-  auto_execute: true   # 开启自动执行（默认）
-  # auto_execute: false  # 关闭自动执行
-```
-
-或使用环境变量：
-
-```bash
-# 关闭自动执行
-AUTO_EXECUTE=false ./cursor2api
-
-# 开启自动执行
-AUTO_EXECUTE=true ./cursor2api
-```
-
-### 支持的操作
-
-| 操作 | 示例命令 |
-|------|----------|
-| 创建文件 | `echo "内容" > file.txt` |
-| 读取文件 | `cat file.txt` |
-| 列出目录 | `ls -la` |
-| 创建目录 | `mkdir -p dir` |
-| 删除文件 | `rm file.txt` |
-
-### 安全提示
-
-⚠️ **自动执行模式会在本地执行命令，请注意以下安全事项：**
-
-- 仅在可信环境中开启此功能
-- AI 可能生成危险命令（如 `rm -rf`）
-- 建议在沙箱或容器环境中运行
-- 生产环境建议关闭此功能
-
-## Tool Use 协议支持
-
-本项目实现了 Anthropic 的 Tool Use 协议，支持以下工具：
-
-| 工具名称 | 功能 | 参数 |
-|----------|------|------|
-| `bash` | 执行命令 | `command`, `cwd` |
-| `read_file` | 读取文件 | `path` |
-| `write_file` | 写入文件 | `path`, `content` |
-| `list_dir` | 列出目录 | `path` |
-| `edit` | 编辑文件 | `path`, `old_string`, `new_string` |
-
-### 工具接口
-
-```bash
-# 列出可用工具
-curl http://localhost:3010/tools
-
-# 直接执行工具（调试用）
-curl http://localhost:3010/tools/execute \
-  -H "Content-Type: application/json" \
-  -d '{
-    "tool_name": "bash",
-    "input": {"command": "ls -la"}
-  }'
-```
-
 ## 支持的模型
 
 所有请求统一映射到 `claude-opus-4-5-20251101`。
 
-## MCP 服务器
-
-本项目还提供独立的 MCP (Model Context Protocol) 服务器，可供 Claude Desktop、VS Code 等支持 MCP 的客户端使用。
-
-### 编译 MCP 服务器
-
-```bash
-go build -o cursor2api-mcp ./cmd/mcp
-```
-
-### Claude Desktop 配置
-
-编辑 `~/Library/Application Support/Claude/claude_desktop_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "cursor2api": {
-      "command": "/path/to/cursor2api-mcp"
-    }
-  }
-}
-```
-
-### MCP 提供的工具
-
-| 工具 | 功能 |
-|------|------|
-| `bash` | 执行 bash 命令 |
-| `read_file` | 读取文件内容 |
-| `write_file` | 写入文件内容 |
-| `list_dir` | 列出目录内容 |
-| `edit` | 编辑文件（查找替换）|
-
-### 测试 MCP 服务器
-
-```bash
-# 手动测试
-echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | ./cursor2api-mcp
-
-# 查看可用工具
-echo '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' | ./cursor2api-mcp
-```
-
 ## 依赖
 
 - Go 1.21+
-- Chromium 浏览器（API 代理模式需要）
+- Node.js（用于生成 x-is-human token）
 
 ## 免责声明
 
